@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { useListQuizzes, getListQuizzesQueryKey } from "@workspace/api-client-react";
+import { useListQuizzes, getListQuizzesQueryKey } from "@/lib/api-client";
 import { Brain, Clock, Target, ChevronRight, TrendingUp, Award, Search, AlertCircle } from "lucide-react";
 import Layout from "@/components/Layout";
 import { motion } from "framer-motion";

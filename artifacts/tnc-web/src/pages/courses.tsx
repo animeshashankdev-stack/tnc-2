@@ -1,4 +1,4 @@
-import { useGetCourses, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@workspace/api-client-react";
+import { useGetCourses, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@/lib/api-client";
 import { Link } from "wouter";
 import { BookOpen, Lock, Unlock, ArrowRight, Search } from "lucide-react";
 import { useState } from "react";
@@ -16,9 +16,11 @@ export default function CoursesPage() {
     query: { enabled: !!user, queryKey: getGetUserPurchasesQueryKey(user?.userId ?? "") },
   });
 
-  const purchasedCourseIds = new Set((purchases ?? []).map((p) => p.courseId));
+  const courseList = Array.isArray(courses) ? courses : [];
+  const purchaseList = Array.isArray(purchases) ? purchases : [];
+  const purchasedCourseIds = new Set(purchaseList.map((p) => p.courseId));
 
-  const filtered = (courses ?? []).filter((c) =>
+  const filtered = courseList.filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase())
   );
 

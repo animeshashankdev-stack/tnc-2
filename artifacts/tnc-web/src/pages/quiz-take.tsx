@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, Link } from "wouter";
-import { useGetQuiz, getGetQuizQueryKey } from "@workspace/api-client-react";
+import { useGetQuiz, getGetQuizQueryKey } from "@/lib/api-client";
 import {
   ArrowLeft, ArrowRight, Clock, CheckCircle2, XCircle, Circle,
   Trophy, RotateCcw, Brain, AlertTriangle, BookOpen, Target

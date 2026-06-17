@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Link } from "wouter";
-import { useGetSliders, useGetCourses, useGetPromoStatus } from "@workspace/api-client-react";
+import { useGetSliders, useGetCourses, useGetPromoStatus } from "@/lib/api-client";
 import { BookOpen, Video, FileText, Award, ChevronLeft, ChevronRight, ArrowRight, CheckCircle, Star } from "lucide-react";
 import { motion } from "framer-motion";
 import Layout from "@/components/Layout";

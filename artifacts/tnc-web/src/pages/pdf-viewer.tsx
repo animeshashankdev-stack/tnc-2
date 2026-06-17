@@ -1,5 +1,5 @@
 import { useParams, Link } from "wouter";
-import { useGetSession, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@workspace/api-client-react";
+import { useGetSession, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@/lib/api-client";
 import { ArrowLeft, Lock, ExternalLink, FileText } from "lucide-react";
 import Layout from "@/components/Layout";
 import { getUser } from "@/lib/auth";

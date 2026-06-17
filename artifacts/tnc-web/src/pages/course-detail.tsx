@@ -1,5 +1,5 @@
 import { useParams, Link } from "wouter";
-import { useGetCourses, useListSessions, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey, getListSessionsQueryKey } from "@workspace/api-client-react";
+import { useGetCourses, useListSessions, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey, getListSessionsQueryKey } from "@/lib/api-client";
 import { Video, FileText, Lock, PlayCircle, ChevronRight, ArrowLeft, Smartphone, AlertCircle } from "lucide-react";
 import Layout from "@/components/Layout";
 import { getUser } from "@/lib/auth";

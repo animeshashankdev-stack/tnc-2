@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAdminLogin, useGetAdminStats, useGetAdminUsers, useTogglePromo, useGetPromoStatus, getGetAdminStatsQueryKey, getGetAdminUsersQueryKey, getGetPromoStatusQueryKey } from "@workspace/api-client-react";
+import { useAdminLogin, useGetAdminStats, useGetAdminUsers, useTogglePromo, useGetPromoStatus, getGetAdminStatsQueryKey, getGetAdminUsersQueryKey, getGetPromoStatusQueryKey } from "@/lib/api-client";
 import { Shield, Users, BookOpen, Video, ShoppingCart, Search, LogOut, ToggleLeft, ToggleRight, RefreshCw, Calendar, Plus, Minus, Clock } from "lucide-react";
 import { getAdminToken, setAdminToken, clearAdminToken } from "@/lib/auth";
 import { useQueryClient } from "@tanstack/react-query";

@@ -1,4 +1,4 @@
-import { useGetCourses, useGetPromoStatus, useGetUserPurchases, useCreatePurchase, getGetUserPurchasesQueryKey, getGetCoursesQueryKey } from "@workspace/api-client-react";
+import { useGetCourses, useGetPromoStatus, useGetUserPurchases, useCreatePurchase, getGetUserPurchasesQueryKey, getGetCoursesQueryKey } from "@/lib/api-client";
 import { ShoppingCart, CheckCircle, Lock, ArrowRight, Sparkles } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import Layout from "@/components/Layout";

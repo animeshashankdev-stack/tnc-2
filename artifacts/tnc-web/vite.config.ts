@@ -54,6 +54,13 @@ export default defineConfig({
     dedupe: ["react", "react-dom", "@tanstack/react-query", "@tanstack/query-core"],
     preserveSymlinks: false,
   },
+  optimizeDeps: {
+    include: [
+      "react",
+      "react-dom",
+      "@tanstack/react-query",
+    ],
+  },
   root: path.resolve(import.meta.dirname),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { useGetCourses, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@workspace/api-client-react";
+import { useGetCourses, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey } from "@/lib/api-client";
 import { FileText, Lock, Search, BookOpen, ChevronRight, ArrowRight } from "lucide-react";
 import Layout from "@/components/Layout";
 import { getUser } from "@/lib/auth";
@@ -16,13 +16,14 @@ export default function EnotesPage() {
     query: { enabled: !!user, queryKey: getGetUserPurchasesQueryKey(user?.userId ?? "") },
   });
 
-  const purchasedIds = new Set((purchases ?? []).map((p) => p.courseId));
+  const courseList = Array.isArray(courses) ? courses : [];
+  const purchasedIds = new Set((Array.isArray(purchases) ? purchases : []).map((p) => p.courseId));
 
   function isUnlocked(courseRowId: string) {
     return promo?.enabled || purchasedIds.has(courseRowId);
   }
 
-  const filtered = (courses ?? []).filter((c) =>
+  const filtered = courseList.filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -37,7 +38,7 @@ export default function EnotesPage() {
             <h1 className="text-2xl md:text-3xl font-black">E-Notes / PDF Notes</h1>
           </div>
           <p className="text-white/70 text-sm ml-[52px]">
-            {(courses ?? []).length > 0 ? `${(courses ?? []).length} courses with comprehensive study materials` : "Structured PDF notes for all nursing exams"}
+            {courseList.length > 0 ? `${courseList.length} courses with comprehensive study materials` : "Structured PDF notes for all nursing exams"}
           </p>
         </div>
       </div>
