@@ -1,25 +1,39 @@
 import { useParams, Link } from "wouter";
 import { useEffect, useRef, useState } from "react";
 import { useGetSession, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey, useListSessions, getListSessionsQueryKey } from "@/lib/api-client";
-import { ArrowLeft, Lock, Video, Smartphone, FileText, AlertCircle, ChevronRight, PlayCircle } from "lucide-react";
+import { ArrowLeft, Lock, Video, FileText, AlertCircle, ChevronRight, PlayCircle, ShieldAlert } from "lucide-react";
 import Layout from "@/components/Layout";
 import { getUser } from "@/lib/auth";
+import { markVideoWatched } from "@/lib/streak";
 
-const CRM_BASE = "https://crm.tncnursing.in";
+const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 
-function HlsPlayer({ src }: { src: string }) {
+function getApiUrl(path: string) {
+  return `${BASE}${path}`;
+}
+
+function HlsPlayer({ src, sessionId }: { src: string; sessionId?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    setError(false);
     let cleanup: (() => void) | undefined;
-    if (src.includes(".m3u8")) {
+
+    const isHls = src.includes(".m3u8");
+    const isProxied = src.startsWith("/api/media-proxy");
+
+    if (isHls && !isProxied) {
       import("hls.js").then(({ default: Hls }) => {
         if (Hls.isSupported()) {
-          const hls = new Hls();
+          const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
           hls.loadSource(src);
           hls.attachMedia(video);
+          hls.on(Hls.Events.ERROR, (_e, data) => {
+            if (data.fatal) setError(true);
+          });
           cleanup = () => hls.destroy();
         } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
           video.src = src;
@@ -27,21 +41,60 @@ function HlsPlayer({ src }: { src: string }) {
       });
     } else {
       video.src = src;
+      video.onerror = () => setError(true);
     }
+
+    if (sessionId) {
+      const onPlay = () => markVideoWatched(sessionId);
+      video.addEventListener("play", onPlay);
+      const prevCleanup = cleanup;
+      cleanup = () => {
+        video.removeEventListener("play", onPlay);
+        prevCleanup?.();
+      };
+    }
+
     return () => cleanup?.();
-  }, [src]);
+  }, [src, sessionId]);
+
+  if (error) {
+    return (
+      <div className="w-full h-64 bg-black rounded-xl flex flex-col items-center justify-center text-white/60 gap-3">
+        <AlertCircle size={36} />
+        <p className="text-sm">Video failed to load. Try refreshing.</p>
+        <button
+          onClick={() => { setError(false); if (videoRef.current) videoRef.current.load(); }}
+          className="px-4 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm transition-colors"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <video ref={videoRef} controls className="w-full max-h-[70vh] bg-black rounded-xl" data-testid="video-player">
+    <video
+      ref={videoRef}
+      controls
+      playsInline
+      className="w-full max-h-[70vh] bg-black rounded-xl"
+      data-testid="video-player"
+      controlsList="nodownload"
+    >
       Your browser does not support video playback.
     </video>
   );
 }
 
 function YouTubeEmbed({ url }: { url: string }) {
-  // Extract video ID from various YouTube URL formats
   const videoId = url.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/)?.[1];
-  if (!videoId) return <div className="h-40 flex items-center justify-center text-white/50 text-sm">Could not extract video ID from URL</div>;
+  if (!videoId) {
+    return (
+      <div className="h-40 flex items-center justify-center text-white/50 text-sm bg-black rounded-xl">
+        Could not parse YouTube video ID
+      </div>
+    );
+  }
   return (
     <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
       <iframe
@@ -57,8 +110,7 @@ function YouTubeEmbed({ url }: { url: string }) {
 }
 
 function PdfViewer({ url, title }: { url: string; title: string }) {
-  const base = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
-  const fullUrl = url.startsWith("http") ? url : `${base}${url}`;
+  const fullUrl = url.startsWith("http") ? url : getApiUrl(url);
   return (
     <div className="space-y-3">
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -86,25 +138,23 @@ function PdfViewer({ url, title }: { url: string; title: string }) {
   );
 }
 
-function FirebaseOnlyCard({ title }: { title: string }) {
+function SecuredVideoCard({ title, firebaseId }: { title: string; firebaseId: string | null }) {
   return (
-    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl border border-blue-100 p-8 text-center">
-      <div className="w-16 h-16 rounded-2xl bg-blue-100 flex items-center justify-center mx-auto mb-4">
-        <Smartphone size={32} className="text-blue-600" />
+    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl border border-slate-700 p-8 text-center">
+      <div className="w-16 h-16 rounded-2xl bg-slate-700 flex items-center justify-center mx-auto mb-4">
+        <ShieldAlert size={32} className="text-amber-400" />
       </div>
-      <h2 className="text-base font-bold text-gray-800 mb-2">{title}</h2>
-      <p className="text-sm text-gray-500 mb-4 max-w-xs mx-auto">
-        This lecture video is available exclusively in the <strong>TNC Nursing Classes</strong> mobile app (Firebase-secured stream).
+      <h2 className="text-base font-bold text-white mb-2">{title}</h2>
+      <p className="text-sm text-slate-400 mb-1 max-w-xs mx-auto">
+        This lecture is hosted on a secured media server.
       </p>
-      <div className="flex flex-col sm:flex-row gap-2 justify-center">
-        <a
-          href="https://play.google.com/store/apps/details?id=in.tncnursing.app"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl tnc-brand-gradient text-white text-sm font-semibold hover:opacity-90 transition-opacity"
-        >
-          <Smartphone size={15} /> Download App
-        </a>
+      {firebaseId && (
+        <p className="text-xs text-slate-500 mb-4 font-mono">ID: {firebaseId.slice(0, 8)}…</p>
+      )}
+      <div className="bg-slate-700/50 rounded-xl p-4 max-w-xs mx-auto text-left">
+        <p className="text-xs text-slate-300 leading-relaxed">
+          <span className="font-semibold text-amber-400">📌 Note:</span> TNC is in the process of migrating all secured lectures to the web platform. This video will be available here soon. Meanwhile, all newer courses stream directly without any restriction.
+        </p>
       </div>
     </div>
   );
@@ -120,36 +170,60 @@ function NoContentCard({ title }: { title: string }) {
   );
 }
 
+function VideoPlayer({ session, sessionId }: { session: { videoUrl: string | null; contentType: string; title: string }; sessionId: string }) {
+  const { videoUrl } = session;
+  if (!videoUrl) return null;
+
+  const isYT = videoUrl.includes("youtube.com") || videoUrl.includes("youtu.be");
+
+  return (
+    <div className="bg-black rounded-2xl overflow-hidden shadow-2xl">
+      {isYT ? (
+        <YouTubeEmbed url={videoUrl} />
+      ) : (
+        <HlsPlayer src={videoUrl.startsWith("/api/") ? getApiUrl(videoUrl) : videoUrl} sessionId={sessionId} />
+      )}
+    </div>
+  );
+}
+
 function CoursePlaylist({ courseId, currentSessionId }: { courseId: string; currentSessionId: string }) {
   const [showAll, setShowAll] = useState(false);
-  const { data: sessions } = useListSessions(
+  const { data: sessionsRaw } = useListSessions(
     { courseId },
     { query: { queryKey: getListSessionsQueryKey({ courseId }) } }
   );
 
-  const videoSessions = (sessions ?? []).filter((s) => s.contentType === "youtube" || s.videoUrl || s.contentType === "pdf");
-  const displaySessions = showAll ? videoSessions : videoSessions.slice(0, 10);
+  const sessions = Array.isArray(sessionsRaw) ? sessionsRaw : [];
+  const displaySessions = showAll ? sessions : sessions.slice(0, 12);
 
-  if (!videoSessions.length) return null;
+  if (!sessions.length) return null;
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
       <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between">
         <h3 className="text-sm font-bold text-gray-800">Course Playlist</h3>
-        <span className="text-xs text-gray-400">{videoSessions.length} lessons</span>
+        <span className="text-xs text-gray-400">{sessions.length} lessons</span>
       </div>
       <div className="divide-y divide-gray-50 max-h-80 overflow-y-auto">
         {displaySessions.map((s) => {
           const isCurrent = s.rowId === currentSessionId;
           const isVideo = s.contentType === "youtube" || s.videoUrl;
+          const isPdf = s.contentType === "pdf" || s.pdfUrl;
+          const href = isVideo
+            ? `/watch/${s.rowId}`
+            : isPdf
+              ? `/pdf/${s.rowId}`
+              : `/watch/${s.rowId}`;
+
           return (
             <Link
               key={s.rowId}
-              href={isVideo ? `/watch/${s.rowId}` : `/pdf/${s.rowId}`}
+              href={href}
               className={`flex items-center gap-3 px-4 py-3 hover:bg-blue-50 transition-colors ${isCurrent ? "bg-blue-50 border-l-2 border-blue-600" : ""}`}
             >
               <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${isCurrent ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-400"}`}>
-                {isVideo ? <PlayCircle size={14} /> : <FileText size={13} />}
+                {isVideo ? <PlayCircle size={14} /> : isPdf ? <FileText size={13} /> : <Video size={13} />}
               </div>
               <p className={`text-xs font-medium truncate flex-1 ${isCurrent ? "text-blue-700" : "text-gray-700"}`}>{s.title}</p>
               {isCurrent && <div className="w-1.5 h-1.5 rounded-full bg-blue-600 flex-shrink-0" />}
@@ -157,12 +231,12 @@ function CoursePlaylist({ courseId, currentSessionId }: { courseId: string; curr
           );
         })}
       </div>
-      {videoSessions.length > 10 && (
+      {sessions.length > 12 && (
         <button
           onClick={() => setShowAll(!showAll)}
           className="w-full py-2.5 text-xs font-medium text-blue-600 hover:bg-blue-50 border-t transition-colors"
         >
-          {showAll ? "Show less" : `Show all ${videoSessions.length} lessons`}
+          {showAll ? "Show less" : `Show all ${sessions.length} lessons`}
         </button>
       )}
     </div>
@@ -179,9 +253,8 @@ export default function WatchPage() {
     query: { enabled: !!user, queryKey: getGetUserPurchasesQueryKey(user?.userId ?? "") },
   });
 
-  const purchasedIds = new Set((purchases ?? []).map((p) => p.courseId));
+  const purchasedIds = new Set((Array.isArray(purchases) ? purchases : []).map((p) => p.courseId));
   const isCourseUnlocked = promo?.enabled || (!!session?.courseId && purchasedIds.has(session.courseId));
-  // Free sessions (isPaid=false) are always accessible
   const isUnlocked = !session?.isPaid || isCourseUnlocked;
 
   if (isLoading) {
@@ -211,6 +284,8 @@ export default function WatchPage() {
   const contentType = session.contentType ?? (session.videoUrl ? "youtube" : "none");
   const backHref = session.courseId ? `/courses/${session.courseId}` : "/courses";
 
+  const firebaseId = (session as unknown as Record<string, unknown>).firebaseId as string | null ?? null;
+
   return (
     <Layout>
       <div className="max-w-5xl mx-auto px-4 py-6">
@@ -223,7 +298,6 @@ export default function WatchPage() {
         </Link>
 
         <div className="flex flex-col lg:flex-row gap-5">
-          {/* Main content */}
           <div className="flex-1 min-w-0">
             {!isUnlocked ? (
               <div className="bg-gray-100 rounded-2xl p-12 text-center">
@@ -237,22 +311,15 @@ export default function WatchPage() {
             ) : (
               <div className="space-y-4">
                 {contentType === "youtube" && session.videoUrl ? (
-                  <div className="bg-black rounded-2xl overflow-hidden shadow-2xl">
-                    {session.videoUrl.includes("youtube.com") || session.videoUrl.includes("youtu.be") ? (
-                      <YouTubeEmbed url={session.videoUrl} />
-                    ) : (
-                      <HlsPlayer src={session.videoUrl} />
-                    )}
-                  </div>
+                  <VideoPlayer session={session} sessionId={sessionId ?? ""} />
                 ) : contentType === "pdf" && session.pdfUrl ? (
                   <PdfViewer url={session.pdfUrl} title={session.title} />
                 ) : contentType === "firebase" ? (
-                  <FirebaseOnlyCard title={session.title} />
+                  <SecuredVideoCard title={session.title} firebaseId={firebaseId} />
                 ) : (
                   <NoContentCard title={session.title} />
                 )}
 
-                {/* Session info */}
                 {contentType !== "pdf" && (
                   <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
                     <div className="flex items-start justify-between gap-3">
@@ -274,7 +341,6 @@ export default function WatchPage() {
             )}
           </div>
 
-          {/* Sidebar playlist */}
           {session.courseId && (
             <div className="lg:w-72 flex-shrink-0">
               <CoursePlaylist courseId={session.courseId} currentSessionId={sessionId ?? ""} />

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, Link } from "wouter";
 import { useGetQuiz, getGetQuizQueryKey } from "@/lib/api-client";
+import { markQuizCompleted } from "@/lib/streak";
 import {
   ArrowLeft, ArrowRight, Clock, CheckCircle2, XCircle, Circle,
   Trophy, RotateCcw, Brain, AlertTriangle, BookOpen, Target
@@ -79,8 +80,9 @@ export default function QuizTakePage() {
       : 0;
 
     setResults({ score: finalScore, correct, wrong, unattempted, percentage });
+    markQuizCompleted(examId ?? "");
     setPhase("results");
-  }, [questions, quiz?.negativeMarks]);
+  }, [questions, quiz?.negativeMarks, examId]);
 
   // Timer
   useEffect(() => {

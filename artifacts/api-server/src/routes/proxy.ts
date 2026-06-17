@@ -39,7 +39,7 @@ function parseCourse(row: Record<string, unknown>) {
     description: json._de ?? "",
     serialNo: json._sno ?? "",
     imageUrl: buildMediaUrl(at.url as string),
-    createdAt: row.cr_on,
+    createdAt: row.cr_on as string,
     updatedAt: row.up_on,
   };
 }
@@ -49,9 +49,41 @@ function isYouTubeUrl(url: unknown): url is string {
   return url.includes("youtube.com") || url.includes("youtu.be");
 }
 
-function isPlayableUrl(url: unknown): url is string {
-  if (typeof url !== "string" || !url.startsWith("http")) return false;
-  return true;
+function isDirectVideoUrl(url: unknown): url is string {
+  if (typeof url !== "string") return false;
+  if (!url.startsWith("http")) return false;
+  return (
+    url.includes(".mp4") ||
+    url.includes(".m3u8") ||
+    url.includes(".webm") ||
+    url.includes(".mov") ||
+    url.includes("video") ||
+    url.includes("stream") ||
+    url.includes("cloudfront") ||
+    url.includes("vimeo") ||
+    url.includes("bunny") ||
+    url.includes("cdn")
+  );
+}
+
+function isPlayableVideoUrl(url: unknown): url is string {
+  return isYouTubeUrl(url) || isDirectVideoUrl(url);
+}
+
+function isFirebaseStorageUrl(url: unknown): url is string {
+  if (typeof url !== "string") return false;
+  return url.includes("firebasestorage.googleapis.com") || url.startsWith("gs://");
+}
+
+function convertFirebaseStorageUrl(url: string): string {
+  if (url.startsWith("gs://")) {
+    const withoutGs = url.replace("gs://", "");
+    const slashIdx = withoutGs.indexOf("/");
+    const bucket = withoutGs.slice(0, slashIdx);
+    const path = withoutGs.slice(slashIdx + 1);
+    return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(path)}?alt=media`;
+  }
+  return url;
 }
 
 function parseChapter(row: Record<string, unknown>) {
@@ -61,30 +93,75 @@ function parseChapter(row: Record<string, unknown>) {
   const deVi = (de._vi as Record<string, unknown>) ?? {};
   const deNo = (de._no as Record<string, unknown>) ?? {};
 
-  const rawVideoUrl = (vi._vi_url ?? deVi.url ?? "") as string;
-  const videoUrl = isYouTubeUrl(rawVideoUrl) || isPlayableUrl(rawVideoUrl) ? rawVideoUrl : null;
+  // Collect all possible video URL fields from both old and new schema
+  const rawVideoUrls = [
+    vi._vi_url,
+    deVi.url,
+    vi.url,
+    json._vi_url,
+    json.video_url,
+    vi.video_url,
+  ].filter(Boolean) as string[];
 
+  let videoUrl: string | null = null;
+  let contentType: "youtube" | "firebase" | "pdf" | "none" = "none";
+
+  for (const raw of rawVideoUrls) {
+    if (!raw || typeof raw !== "string") continue;
+    if (isFirebaseStorageUrl(raw)) {
+      videoUrl = `/api/media-proxy?url=${encodeURIComponent(convertFirebaseStorageUrl(raw))}`;
+      contentType = "youtube"; // treat as playable video
+      break;
+    }
+    if (isYouTubeUrl(raw)) {
+      videoUrl = raw;
+      contentType = "youtube";
+      break;
+    }
+    if (isDirectVideoUrl(raw)) {
+      videoUrl = raw;
+      contentType = "youtube";
+      break;
+    }
+  }
+
+  // Firebase ID for secured content (UUID style)
   const firebaseId = (vi._fs_id ?? deVi.fs_id ?? "") as string;
-  const hasFirebase = typeof firebaseId === "string" && firebaseId.trim().length > 10;
+  const hasFirebaseId = typeof firebaseId === "string" && firebaseId.trim().length > 10;
 
+  if (!videoUrl && hasFirebaseId) {
+    contentType = "firebase";
+  }
+
+  // PDF handling — uploads/ path (CRM-hosted, proxy works)
   const rawPdfPath = ((deNo.url ?? "") as string).replace(/^\//, "");
   const isCrmHostedPdf = rawPdfPath.startsWith("uploads/");
-  const pdfUrl = isCrmHostedPdf
-    ? `/api/pdf?path=${encodeURIComponent(rawPdfPath)}`
-    : null;
+  let pdfUrl: string | null = null;
 
-  const hasFirebasePdf = !isCrmHostedPdf && rawPdfPath.length > 0;
-
-  let contentType: "youtube" | "firebase" | "pdf" | "none";
-  if (videoUrl) {
-    contentType = "youtube";
-  } else if (hasFirebase || hasFirebasePdf) {
-    contentType = "firebase";
-  } else if (pdfUrl) {
-    contentType = "pdf";
-  } else {
-    contentType = "none";
+  if (isCrmHostedPdf) {
+    pdfUrl = `/api/pdf?path=${encodeURIComponent(rawPdfPath)}`;
+    if (!videoUrl && contentType !== "firebase") {
+      contentType = "pdf";
+    }
   }
+
+  // Firebase PDF (stored as Firebase URL in _no.url)
+  const rawNoUrl = (deNo.url ?? deNo.uri ?? "") as string;
+  const hasFirebasePdf = !isCrmHostedPdf && (
+    isFirebaseStorageUrl(rawNoUrl) || (rawNoUrl.length > 5 && !isCrmHostedPdf)
+  );
+
+  if (!videoUrl && !pdfUrl && hasFirebasePdf && rawNoUrl.startsWith("http")) {
+    pdfUrl = `/api/media-proxy?url=${encodeURIComponent(rawNoUrl)}`;
+    if (contentType === "none") contentType = "pdf";
+  }
+
+  // Determine final type
+  const finalType = videoUrl
+    ? "video"
+    : pdfUrl
+      ? "pdf"
+      : "content";
 
   return {
     id: row.id as number,
@@ -93,8 +170,9 @@ function parseChapter(row: Record<string, unknown>) {
     description: "",
     videoUrl,
     pdfUrl,
+    firebaseId: hasFirebaseId ? firebaseId : null,
     contentType,
-    type: contentType === "youtube" ? "video" : contentType === "pdf" ? "pdf" : "content",
+    type: finalType,
     courseId: (row.co_refid ?? json._co) as string | null,
     subjectId: (row.su_refid ?? json._su) as string | null,
     isPaid: (json._pr_ty as number) === 1,
@@ -182,7 +260,7 @@ function parseQuestion(row: Record<string, unknown>) {
   };
 }
 
-// GET /api/courses
+// GET /api/courses — newest first
 router.get("/courses", async (_req: Request, res: Response): Promise<void> => {
   try {
     const data = await crmQuery({
@@ -192,11 +270,11 @@ router.get("/courses", async (_req: Request, res: Response): Promise<void> => {
     const courses = Array.isArray(data)
       ? (data as Record<string, unknown>[]).map(parseCourse)
       : [];
-    // Sort by serial number
+    // Sort newest first by createdAt
     courses.sort((a, b) => {
-      const aNo = parseFloat(String(a.serialNo)) || 0;
-      const bNo = parseFloat(String(b.serialNo)) || 0;
-      return aNo - bNo;
+      const aTime = String(a.createdAt ?? "");
+      const bTime = String(b.createdAt ?? "");
+      return bTime.localeCompare(aTime);
     });
     res.json(courses);
   } catch (err) {
@@ -205,7 +283,7 @@ router.get("/courses", async (_req: Request, res: Response): Promise<void> => {
   }
 });
 
-// GET /api/pdf?path=... — proxy PDFs from CRM
+// GET /api/pdf?path=... — proxy PDFs from CRM (uploads/ paths)
 router.get("/pdf", async (req: Request, res: Response): Promise<void> => {
   try {
     const { path: pdfPath } = req.query;
@@ -219,8 +297,8 @@ router.get("/pdf", async (req: Request, res: Response): Promise<void> => {
       res.status(upstream.status).json({ error: "PDF not found" });
       return;
     }
-    const contentType = upstream.headers.get("content-type") ?? "application/pdf";
-    res.setHeader("Content-Type", contentType);
+    const ct = upstream.headers.get("content-type") ?? "application/pdf";
+    res.setHeader("Content-Type", ct);
     res.setHeader("Content-Disposition", "inline");
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -232,10 +310,60 @@ router.get("/pdf", async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// GET /api/sessions — queries t_ch (real video sessions)
+// GET /api/media-proxy?url=... — generic media proxy for Firebase Storage / CORS-blocked URLs
+router.get("/media-proxy", async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { url } = req.query;
+    if (!url || typeof url !== "string") {
+      res.status(400).json({ error: "Missing url" });
+      return;
+    }
+    // Only allow known trusted domains
+    const allowedDomains = [
+      "firebasestorage.googleapis.com",
+      "crm.tncnursing.in",
+      "storage.googleapis.com",
+    ];
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      res.status(400).json({ error: "Invalid URL" });
+      return;
+    }
+    if (!allowedDomains.some((d) => parsedUrl.hostname.endsWith(d))) {
+      res.status(403).json({ error: "Domain not allowed" });
+      return;
+    }
+
+    const upstream = await fetch(url, {
+      headers: { "Accept": "*/*" },
+    });
+
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ error: `Upstream error ${upstream.status}` });
+      return;
+    }
+
+    const ct = upstream.headers.get("content-type") ?? "application/octet-stream";
+    const cl = upstream.headers.get("content-length");
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    if (cl) res.setHeader("Content-Length", cl);
+
+    const buf = await upstream.arrayBuffer();
+    res.end(Buffer.from(buf));
+  } catch (err) {
+    logger.error({ err }, "Media proxy failed");
+    res.status(500).json({ error: "Media proxy failed" });
+  }
+});
+
+// GET /api/sessions — queries t_ch (real video sessions) with pagination + sort
 router.get("/sessions", async (req: Request, res: Response): Promise<void> => {
   try {
-    const { courseId, limit: limitParam, type } = req.query;
+    const { courseId, limit: limitParam, type, sort, page: pageParam } = req.query;
     const cond: Record<string, unknown> = {};
     if (courseId) cond.co_refid = courseId;
 
@@ -245,7 +373,7 @@ router.get("/sessions", async (req: Request, res: Response): Promise<void> => {
     });
 
     if (!Array.isArray(data)) {
-      res.json([]);
+      res.json(courseId ? [] : { sessions: [], total: 0 });
       return;
     }
 
@@ -258,12 +386,31 @@ router.get("/sessions", async (req: Request, res: Response): Promise<void> => {
       sessions = sessions.filter((s) => s.contentType === "pdf" || s.pdfUrl);
     }
 
-    // Sort by serial number ascending
-    sessions.sort((a, b) => {
-      const aNo = parseFloat(String(a.serialNo)) || 0;
-      const bNo = parseFloat(String(b.serialNo)) || 0;
-      return aNo - bNo;
-    });
+    // Sort
+    if (sort === "newest") {
+      sessions.sort((a, b) => {
+        const aTime = String(a.createdAt ?? "");
+        const bTime = String(b.createdAt ?? "");
+        return bTime.localeCompare(aTime);
+      });
+    } else {
+      // Default: sort by serial number ascending (lesson order within a course)
+      sessions.sort((a, b) => {
+        const aNo = parseFloat(String(a.serialNo)) || 0;
+        const bNo = parseFloat(String(b.serialNo)) || 0;
+        return aNo - bNo;
+      });
+    }
+
+    // Paginated response when page param given
+    if (pageParam) {
+      const page = Math.max(1, parseInt(String(pageParam)));
+      const limit = Math.min(parseInt(String(limitParam ?? "30")), 100);
+      const total = sessions.length;
+      const paged = sessions.slice((page - 1) * limit, page * limit);
+      res.json({ sessions: paged, total, page, limit });
+      return;
+    }
 
     // Limit when no courseId to avoid huge payloads
     if (!courseId) {
@@ -294,6 +441,44 @@ router.get("/sessions/:rowId", async (req: Request, res: Response): Promise<void
   } catch (err) {
     logger.error({ err }, "Failed to fetch session");
     res.status(500).json({ error: "Failed to fetch session" });
+  }
+});
+
+// GET /api/search?q=... — global search across courses, sessions, quizzes
+router.get("/search", async (req: Request, res: Response): Promise<void> => {
+  try {
+    const q = ((req.query.q as string) ?? "").trim().toLowerCase();
+    if (!q || q.length < 2) {
+      res.json({ courses: [], sessions: [], quizzes: [] });
+      return;
+    }
+
+    const [coursesData, quizzesData] = await Promise.all([
+      crmQuery({ fn: "common_fn", se: "fe", sch: "t_co", data: { json: "*" }, cond: {} }),
+      crmQuery({ fn: "common_fn", se: "fe", sch: "t_ex", data: { json: "*", qu_refid: "*" }, cond: {} }),
+    ]);
+
+    const courses = Array.isArray(coursesData)
+      ? (coursesData as Record<string, unknown>[])
+          .map(parseCourse)
+          .filter((c) => String(c.name).toLowerCase().includes(q))
+          .slice(0, 10)
+      : [];
+
+    const quizzes = Array.isArray(quizzesData)
+      ? (quizzesData as Record<string, unknown>[])
+          .filter((row) => {
+            const json = (row.json as Record<string, unknown>) ?? {};
+            return String(json._ex_na ?? "").toLowerCase().includes(q);
+          })
+          .map(parseExam)
+          .slice(0, 10)
+      : [];
+
+    res.json({ courses, sessions: [], quizzes });
+  } catch (err) {
+    logger.error({ err }, "Search failed");
+    res.status(500).json({ error: "Search failed" });
   }
 });
 
@@ -444,7 +629,7 @@ router.post("/admin/login", (req: Request, res: Response): void => {
   res.json({ token: ADMIN_TOKEN, message: "Admin logged in successfully" });
 });
 
-// GET /api/admin/stats — only fetch courses & users (NOT the 59k sessions table)
+// GET /api/admin/stats
 router.get("/admin/stats", async (_req: Request, res: Response): Promise<void> => {
   try {
     const [coursesData, usersData, purchasesData] = await Promise.all([
@@ -456,19 +641,32 @@ router.get("/admin/stats", async (_req: Request, res: Response): Promise<void> =
     const users = Array.isArray(usersData) ? usersData as Record<string, unknown>[] : [];
     const purchases = Array.isArray(purchasesData) ? purchasesData as Record<string, unknown>[] : [];
 
-    // Sort users by created_at descending for recent users
     const sortedUsers = [...users].sort((a, b) => {
       const aTime = String(a.cr_on ?? "");
       const bTime = String(b.cr_on ?? "");
       return bTime.localeCompare(aTime);
     });
 
+    // Registration trend: last 7 days
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const trend = Array.from({ length: 7 }, (_, i) => {
+      const dayStart = new Date(now - (6 - i) * day);
+      const dayLabel = dayStart.toLocaleDateString("en-IN", { weekday: "short" });
+      const count = users.filter((u) => {
+        const t = String(u.cr_on ?? "");
+        return t.slice(0, 10) === dayStart.toISOString().slice(0, 10);
+      }).length;
+      return { label: dayLabel, count };
+    });
+
     res.json({
       totalUsers: users.length,
       totalCourses: courses.length,
-      totalSessions: 59806, // Known count from t_ch — too large to fetch dynamically
+      totalSessions: 59806,
       totalPurchases: purchases.length,
-      recentUsers: sortedUsers.slice(0, 15).map(parseAdminUser),
+      recentUsers: sortedUsers.slice(0, 20).map(parseAdminUser),
+      registrationTrend: trend,
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch admin stats");
@@ -476,16 +674,31 @@ router.get("/admin/stats", async (_req: Request, res: Response): Promise<void> =
   }
 });
 
-// GET /api/admin/users
+// GET /api/admin/users — server-side paginated, cached fetch
+const usersCache: { data: Record<string, unknown>[]; fetchedAt: number } | null = null as unknown as { data: Record<string, unknown>[]; fetchedAt: number } | null;
+let usersCacheState: { data: Record<string, unknown>[]; fetchedAt: number } | null = null;
+
 router.get("/admin/users", async (req: Request, res: Response): Promise<void> => {
   try {
     const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     const search = (req.query.search as string) ?? "";
-    const data = await crmQuery({
-      fn: "common_fn", se: "fe", sch: "t_us", data: { json: "*" }, cond: {},
-    });
-    let users = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
+    const sort = (req.query.sort as string) ?? "newest";
+
+    // Use cache if < 5 minutes old
+    const now = Date.now();
+    if (!usersCacheState || now - usersCacheState.fetchedAt > 5 * 60 * 1000) {
+      const freshData = await crmQuery({
+        fn: "common_fn", se: "fe", sch: "t_us", data: { json: "*" }, cond: {},
+      });
+      usersCacheState = {
+        data: Array.isArray(freshData) ? (freshData as Record<string, unknown>[]) : [],
+        fetchedAt: now,
+      };
+    }
+
+    let users = usersCacheState.data;
+
     if (search) {
       const q = search.toLowerCase();
       users = users.filter((row) => {
@@ -497,12 +710,19 @@ router.get("/admin/users", async (req: Request, res: Response): Promise<void> =>
         );
       });
     }
-    // Sort newest first
-    users = [...users].sort((a, b) => String(b.cr_on ?? "").localeCompare(String(a.cr_on ?? "")));
+
+    // Sort
+    if (sort === "oldest") {
+      users = [...users].sort((a, b) => String(a.cr_on ?? "").localeCompare(String(b.cr_on ?? "")));
+    } else {
+      users = [...users].sort((a, b) => String(b.cr_on ?? "").localeCompare(String(a.cr_on ?? "")));
+    }
+
     const total = users.length;
     res.json({
       users: users.slice((page - 1) * limit, page * limit).map(parseAdminUser),
       total, page, limit,
+      cachedAt: new Date(usersCacheState.fetchedAt).toISOString(),
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch admin users");
@@ -549,7 +769,7 @@ router.post("/promo/toggle", (req: Request, res: Response): void => {
   });
 });
 
-// POST /api/promo/extend — extend the free period without toggling
+// POST /api/promo/extend
 router.post("/promo/extend", (req: Request, res: Response): void => {
   const { durationDays, adminToken } = req.body as { durationDays: number; adminToken: string };
   if (adminToken !== ADMIN_TOKEN) {
@@ -560,7 +780,6 @@ router.post("/promo/extend", (req: Request, res: Response): void => {
     res.status(400).json({ error: "Invalid durationDays" });
     return;
   }
-  // Extend from current expiry (or from now if expired/disabled)
   const base = promoState.expiresAt && new Date(promoState.expiresAt) > new Date()
     ? new Date(promoState.expiresAt)
     : new Date();
@@ -573,11 +792,12 @@ router.post("/promo/extend", (req: Request, res: Response): void => {
   });
 });
 
-// GET /api/quizzes — list exam sets from t_ex
+// GET /api/quizzes — list exam sets from t_ex, newest first
 router.get("/quizzes", async (req: Request, res: Response): Promise<void> => {
   try {
     const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const search = ((req.query.search as string) ?? "").toLowerCase();
 
     const data = await crmQuery({
       fn: "common_fn", se: "fe", sch: "t_ex",
@@ -589,13 +809,19 @@ router.get("/quizzes", async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Filter out exams with no questions
-    const valid = (data as Record<string, unknown>[]).filter((row) => {
+    let valid = (data as Record<string, unknown>[]).filter((row) => {
       const ids = (row.qu_refid as string[]) ?? [];
       return ids.length > 0;
     });
 
-    // Sort by most recent (examno descending)
+    if (search) {
+      valid = valid.filter((row) => {
+        const json = (row.json as Record<string, unknown>) ?? {};
+        return String(json._ex_na ?? "").toLowerCase().includes(search);
+      });
+    }
+
+    // Sort newest first (examno descending)
     const sorted = [...valid].sort((a, b) =>
       ((b.examno as number) ?? 0) - ((a.examno as number) ?? 0)
     );
@@ -610,7 +836,7 @@ router.get("/quizzes", async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// GET /api/quiz/:examId — fetch exam with questions
+// GET /api/quiz/:examId — fetch exam with ALL questions (actual count, no hardcode)
 router.get("/quiz/:examId", async (req: Request, res: Response): Promise<void> => {
   try {
     const { examId } = req.params;
@@ -627,41 +853,41 @@ router.get("/quiz/:examId", async (req: Request, res: Response): Promise<void> =
 
     const exam = (data as Record<string, unknown>[])[0];
     const quRefids = (exam.qu_refid as string[]) ?? [];
+    const actualQuestionCount = quRefids.length;
 
-    // Fetch up to 200 questions in batches of 50
-    const MAX_QUESTIONS = 200;
+    // Fetch ALL questions in parallel batches of 50 (no hardcoded cap)
     const BATCH_SIZE = 50;
-    const questionIds = quRefids.slice(0, MAX_QUESTIONS);
-
     const batches: string[][] = [];
-    for (let i = 0; i < questionIds.length; i += BATCH_SIZE) {
-      batches.push(questionIds.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < actualQuestionCount; i += BATCH_SIZE) {
+      batches.push(quRefids.slice(i, i + BATCH_SIZE));
     }
 
     const batchResults = await Promise.all(
-      batches.map((batch) =>
-        Promise.allSettled(
-          batch.map((rowId) =>
-            crmQuery({
-              fn: "common_fn", se: "fe", sch: "t_qu",
-              data: { json: "*" }, cond: { row_id: rowId },
-            })
-          )
-        )
+      batches.map((ids) =>
+        crmQuery({
+          fn: "common_fn", se: "fe", sch: "t_qu",
+          data: { json: "*" }, cond: { row_id: ids },
+        })
       )
     );
 
     const questions = batchResults
-      .flat()
-      .filter((r): r is PromiseFulfilledResult<unknown> => r.status === "fulfilled")
-      .flatMap((r) => {
-        const val = r.value;
-        return Array.isArray(val) ? (val as Record<string, unknown>[]) : [];
-      })
+      .flatMap((r) => (Array.isArray(r) ? (r as Record<string, unknown>[]) : []))
       .map(parseQuestion)
-      .filter((q) => q.questionText.trim() !== "");
+      .filter((q) => q.questionText.trim().length > 0);
 
-    res.json({ ...parseExam(exam), questions });
+    // Sort by questionNo if available, else preserve CRM order
+    questions.sort((a, b) => {
+      if (a.questionNo !== null && b.questionNo !== null) return a.questionNo - b.questionNo;
+      return 0;
+    });
+
+    const examMeta = parseExam(exam);
+    res.json({
+      ...examMeta,
+      questionCount: actualQuestionCount,
+      questions,
+    });
   } catch (err) {
     logger.error({ err }, "Failed to fetch quiz");
     res.status(500).json({ error: "Failed to fetch quiz" });

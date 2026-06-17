@@ -32634,9 +32634,24 @@ function isYouTubeUrl(url) {
   if (typeof url !== "string" || !url.startsWith("http")) return false;
   return url.includes("youtube.com") || url.includes("youtu.be");
 }
-function isPlayableUrl(url) {
-  if (typeof url !== "string" || !url.startsWith("http")) return false;
-  return true;
+function isDirectVideoUrl(url) {
+  if (typeof url !== "string") return false;
+  if (!url.startsWith("http")) return false;
+  return url.includes(".mp4") || url.includes(".m3u8") || url.includes(".webm") || url.includes(".mov") || url.includes("video") || url.includes("stream") || url.includes("cloudfront") || url.includes("vimeo") || url.includes("bunny") || url.includes("cdn");
+}
+function isFirebaseStorageUrl(url) {
+  if (typeof url !== "string") return false;
+  return url.includes("firebasestorage.googleapis.com") || url.startsWith("gs://");
+}
+function convertFirebaseStorageUrl(url) {
+  if (url.startsWith("gs://")) {
+    const withoutGs = url.replace("gs://", "");
+    const slashIdx = withoutGs.indexOf("/");
+    const bucket = withoutGs.slice(0, slashIdx);
+    const path = withoutGs.slice(slashIdx + 1);
+    return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(path)}?alt=media`;
+  }
+  return url;
 }
 function parseChapter(row) {
   const json = row.json ?? {};
@@ -32644,24 +32659,55 @@ function parseChapter(row) {
   const de = json._de ?? {};
   const deVi = de._vi ?? {};
   const deNo = de._no ?? {};
-  const rawVideoUrl = vi._vi_url ?? deVi.url ?? "";
-  const videoUrl = isYouTubeUrl(rawVideoUrl) || isPlayableUrl(rawVideoUrl) ? rawVideoUrl : null;
+  const rawVideoUrls = [
+    vi._vi_url,
+    deVi.url,
+    vi.url,
+    json._vi_url,
+    json.video_url,
+    vi.video_url
+  ].filter(Boolean);
+  let videoUrl = null;
+  let contentType = "none";
+  for (const raw of rawVideoUrls) {
+    if (!raw || typeof raw !== "string") continue;
+    if (isFirebaseStorageUrl(raw)) {
+      videoUrl = `/api/media-proxy?url=${encodeURIComponent(convertFirebaseStorageUrl(raw))}`;
+      contentType = "youtube";
+      break;
+    }
+    if (isYouTubeUrl(raw)) {
+      videoUrl = raw;
+      contentType = "youtube";
+      break;
+    }
+    if (isDirectVideoUrl(raw)) {
+      videoUrl = raw;
+      contentType = "youtube";
+      break;
+    }
+  }
   const firebaseId = vi._fs_id ?? deVi.fs_id ?? "";
-  const hasFirebase = typeof firebaseId === "string" && firebaseId.trim().length > 10;
+  const hasFirebaseId = typeof firebaseId === "string" && firebaseId.trim().length > 10;
+  if (!videoUrl && hasFirebaseId) {
+    contentType = "firebase";
+  }
   const rawPdfPath = (deNo.url ?? "").replace(/^\//, "");
   const isCrmHostedPdf = rawPdfPath.startsWith("uploads/");
-  const pdfUrl = isCrmHostedPdf ? `/api/pdf?path=${encodeURIComponent(rawPdfPath)}` : null;
-  const hasFirebasePdf = !isCrmHostedPdf && rawPdfPath.length > 0;
-  let contentType;
-  if (videoUrl) {
-    contentType = "youtube";
-  } else if (hasFirebase || hasFirebasePdf) {
-    contentType = "firebase";
-  } else if (pdfUrl) {
-    contentType = "pdf";
-  } else {
-    contentType = "none";
+  let pdfUrl = null;
+  if (isCrmHostedPdf) {
+    pdfUrl = `/api/pdf?path=${encodeURIComponent(rawPdfPath)}`;
+    if (!videoUrl && contentType !== "firebase") {
+      contentType = "pdf";
+    }
   }
+  const rawNoUrl = deNo.url ?? deNo.uri ?? "";
+  const hasFirebasePdf = !isCrmHostedPdf && (isFirebaseStorageUrl(rawNoUrl) || rawNoUrl.length > 5 && !isCrmHostedPdf);
+  if (!videoUrl && !pdfUrl && hasFirebasePdf && rawNoUrl.startsWith("http")) {
+    pdfUrl = `/api/media-proxy?url=${encodeURIComponent(rawNoUrl)}`;
+    if (contentType === "none") contentType = "pdf";
+  }
+  const finalType = videoUrl ? "video" : pdfUrl ? "pdf" : "content";
   return {
     id: row.id,
     rowId: row.row_id,
@@ -32669,8 +32715,9 @@ function parseChapter(row) {
     description: "",
     videoUrl,
     pdfUrl,
+    firebaseId: hasFirebaseId ? firebaseId : null,
     contentType,
-    type: contentType === "youtube" ? "video" : contentType === "pdf" ? "pdf" : "content",
+    type: finalType,
     courseId: row.co_refid ?? json._co,
     subjectId: row.su_refid ?? json._su,
     isPaid: json._pr_ty === 1,
@@ -32762,9 +32809,9 @@ router2.get("/courses", async (_req, res) => {
     });
     const courses = Array.isArray(data) ? data.map(parseCourse) : [];
     courses.sort((a, b) => {
-      const aNo = parseFloat(String(a.serialNo)) || 0;
-      const bNo = parseFloat(String(b.serialNo)) || 0;
-      return aNo - bNo;
+      const aTime = String(a.createdAt ?? "");
+      const bTime = String(b.createdAt ?? "");
+      return bTime.localeCompare(aTime);
     });
     res.json(courses);
   } catch (err) {
@@ -32785,8 +32832,8 @@ router2.get("/pdf", async (req, res) => {
       res.status(upstream.status).json({ error: "PDF not found" });
       return;
     }
-    const contentType = upstream.headers.get("content-type") ?? "application/pdf";
-    res.setHeader("Content-Type", contentType);
+    const ct = upstream.headers.get("content-type") ?? "application/pdf";
+    res.setHeader("Content-Type", ct);
     res.setHeader("Content-Disposition", "inline");
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -32797,9 +32844,52 @@ router2.get("/pdf", async (req, res) => {
     res.status(500).json({ error: "Failed to load PDF" });
   }
 });
+router2.get("/media-proxy", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url || typeof url !== "string") {
+      res.status(400).json({ error: "Missing url" });
+      return;
+    }
+    const allowedDomains = [
+      "firebasestorage.googleapis.com",
+      "crm.tncnursing.in",
+      "storage.googleapis.com"
+    ];
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      res.status(400).json({ error: "Invalid URL" });
+      return;
+    }
+    if (!allowedDomains.some((d) => parsedUrl.hostname.endsWith(d))) {
+      res.status(403).json({ error: "Domain not allowed" });
+      return;
+    }
+    const upstream = await fetch(url, {
+      headers: { "Accept": "*/*" }
+    });
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ error: `Upstream error ${upstream.status}` });
+      return;
+    }
+    const ct = upstream.headers.get("content-type") ?? "application/octet-stream";
+    const cl = upstream.headers.get("content-length");
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    if (cl) res.setHeader("Content-Length", cl);
+    const buf = await upstream.arrayBuffer();
+    res.end(Buffer.from(buf));
+  } catch (err) {
+    logger.error({ err }, "Media proxy failed");
+    res.status(500).json({ error: "Media proxy failed" });
+  }
+});
 router2.get("/sessions", async (req, res) => {
   try {
-    const { courseId, limit: limitParam, type } = req.query;
+    const { courseId, limit: limitParam, type, sort, page: pageParam } = req.query;
     const cond = {};
     if (courseId) cond.co_refid = courseId;
     const data = await crmQuery({
@@ -32810,7 +32900,7 @@ router2.get("/sessions", async (req, res) => {
       cond
     });
     if (!Array.isArray(data)) {
-      res.json([]);
+      res.json(courseId ? [] : { sessions: [], total: 0 });
       return;
     }
     let sessions = data.map(parseChapter);
@@ -32819,11 +32909,27 @@ router2.get("/sessions", async (req, res) => {
     } else if (type === "pdf") {
       sessions = sessions.filter((s) => s.contentType === "pdf" || s.pdfUrl);
     }
-    sessions.sort((a, b) => {
-      const aNo = parseFloat(String(a.serialNo)) || 0;
-      const bNo = parseFloat(String(b.serialNo)) || 0;
-      return aNo - bNo;
-    });
+    if (sort === "newest") {
+      sessions.sort((a, b) => {
+        const aTime = String(a.createdAt ?? "");
+        const bTime = String(b.createdAt ?? "");
+        return bTime.localeCompare(aTime);
+      });
+    } else {
+      sessions.sort((a, b) => {
+        const aNo = parseFloat(String(a.serialNo)) || 0;
+        const bNo = parseFloat(String(b.serialNo)) || 0;
+        return aNo - bNo;
+      });
+    }
+    if (pageParam) {
+      const page = Math.max(1, parseInt(String(pageParam)));
+      const limit = Math.min(parseInt(String(limitParam ?? "30")), 100);
+      const total = sessions.length;
+      const paged = sessions.slice((page - 1) * limit, page * limit);
+      res.json({ sessions: paged, total, page, limit });
+      return;
+    }
     if (!courseId) {
       const limit = Math.min(parseInt(String(limitParam ?? "200")), 500);
       sessions = sessions.slice(0, limit);
@@ -32852,6 +32958,28 @@ router2.get("/sessions/:rowId", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "Failed to fetch session");
     res.status(500).json({ error: "Failed to fetch session" });
+  }
+});
+router2.get("/search", async (req, res) => {
+  try {
+    const q = (req.query.q ?? "").trim().toLowerCase();
+    if (!q || q.length < 2) {
+      res.json({ courses: [], sessions: [], quizzes: [] });
+      return;
+    }
+    const [coursesData, quizzesData] = await Promise.all([
+      crmQuery({ fn: "common_fn", se: "fe", sch: "t_co", data: { json: "*" }, cond: {} }),
+      crmQuery({ fn: "common_fn", se: "fe", sch: "t_ex", data: { json: "*", qu_refid: "*" }, cond: {} })
+    ]);
+    const courses = Array.isArray(coursesData) ? coursesData.map(parseCourse).filter((c) => String(c.name).toLowerCase().includes(q)).slice(0, 10) : [];
+    const quizzes = Array.isArray(quizzesData) ? quizzesData.filter((row) => {
+      const json = row.json ?? {};
+      return String(json._ex_na ?? "").toLowerCase().includes(q);
+    }).map(parseExam).slice(0, 10) : [];
+    res.json({ courses, sessions: [], quizzes });
+  } catch (err) {
+    logger.error({ err }, "Search failed");
+    res.status(500).json({ error: "Search failed" });
   }
 });
 router2.get("/sliders", async (_req, res) => {
@@ -33042,32 +33170,52 @@ router2.get("/admin/stats", async (_req, res) => {
       const bTime = String(b.cr_on ?? "");
       return bTime.localeCompare(aTime);
     });
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1e3;
+    const trend = Array.from({ length: 7 }, (_, i) => {
+      const dayStart = new Date(now - (6 - i) * day);
+      const dayLabel = dayStart.toLocaleDateString("en-IN", { weekday: "short" });
+      const count = users.filter((u) => {
+        const t = String(u.cr_on ?? "");
+        return t.slice(0, 10) === dayStart.toISOString().slice(0, 10);
+      }).length;
+      return { label: dayLabel, count };
+    });
     res.json({
       totalUsers: users.length,
       totalCourses: courses.length,
       totalSessions: 59806,
-      // Known count from t_ch — too large to fetch dynamically
       totalPurchases: purchases.length,
-      recentUsers: sortedUsers.slice(0, 15).map(parseAdminUser)
+      recentUsers: sortedUsers.slice(0, 20).map(parseAdminUser),
+      registrationTrend: trend
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch admin stats");
     res.status(500).json({ error: "Failed to fetch admin stats" });
   }
 });
+var usersCacheState = null;
 router2.get("/admin/users", async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     const search = req.query.search ?? "";
-    const data = await crmQuery({
-      fn: "common_fn",
-      se: "fe",
-      sch: "t_us",
-      data: { json: "*" },
-      cond: {}
-    });
-    let users = Array.isArray(data) ? data : [];
+    const sort = req.query.sort ?? "newest";
+    const now = Date.now();
+    if (!usersCacheState || now - usersCacheState.fetchedAt > 5 * 60 * 1e3) {
+      const freshData = await crmQuery({
+        fn: "common_fn",
+        se: "fe",
+        sch: "t_us",
+        data: { json: "*" },
+        cond: {}
+      });
+      usersCacheState = {
+        data: Array.isArray(freshData) ? freshData : [],
+        fetchedAt: now
+      };
+    }
+    let users = usersCacheState.data;
     if (search) {
       const q = search.toLowerCase();
       users = users.filter((row) => {
@@ -33075,13 +33223,18 @@ router2.get("/admin/users", async (req, res) => {
         return String(json._us_na ?? "").toLowerCase().includes(q) || String(json._mo ?? "").includes(q) || String(json._em ?? "").toLowerCase().includes(q);
       });
     }
-    users = [...users].sort((a, b) => String(b.cr_on ?? "").localeCompare(String(a.cr_on ?? "")));
+    if (sort === "oldest") {
+      users = [...users].sort((a, b) => String(a.cr_on ?? "").localeCompare(String(b.cr_on ?? "")));
+    } else {
+      users = [...users].sort((a, b) => String(b.cr_on ?? "").localeCompare(String(a.cr_on ?? "")));
+    }
     const total = users.length;
     res.json({
       users: users.slice((page - 1) * limit, page * limit).map(parseAdminUser),
       total,
       page,
-      limit
+      limit,
+      cachedAt: new Date(usersCacheState.fetchedAt).toISOString()
     });
   } catch (err) {
     logger.error({ err }, "Failed to fetch admin users");
@@ -33141,7 +33294,8 @@ router2.post("/promo/extend", (req, res) => {
 router2.get("/quizzes", async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const search = (req.query.search ?? "").toLowerCase();
     const data = await crmQuery({
       fn: "common_fn",
       se: "fe",
@@ -33153,10 +33307,16 @@ router2.get("/quizzes", async (req, res) => {
       res.json({ quizzes: [], total: 0, page, limit });
       return;
     }
-    const valid = data.filter((row) => {
+    let valid = data.filter((row) => {
       const ids = row.qu_refid ?? [];
       return ids.length > 0;
     });
+    if (search) {
+      valid = valid.filter((row) => {
+        const json = row.json ?? {};
+        return String(json._ex_na ?? "").toLowerCase().includes(search);
+      });
+    }
     const sorted = [...valid].sort(
       (a, b) => (b.examno ?? 0) - (a.examno ?? 0)
     );
@@ -33184,33 +33344,34 @@ router2.get("/quiz/:examId", async (req, res) => {
     }
     const exam = data[0];
     const quRefids = exam.qu_refid ?? [];
-    const MAX_QUESTIONS = 200;
+    const actualQuestionCount = quRefids.length;
     const BATCH_SIZE = 50;
-    const questionIds = quRefids.slice(0, MAX_QUESTIONS);
     const batches = [];
-    for (let i = 0; i < questionIds.length; i += BATCH_SIZE) {
-      batches.push(questionIds.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < actualQuestionCount; i += BATCH_SIZE) {
+      batches.push(quRefids.slice(i, i + BATCH_SIZE));
     }
     const batchResults = await Promise.all(
       batches.map(
-        (batch) => Promise.allSettled(
-          batch.map(
-            (rowId) => crmQuery({
-              fn: "common_fn",
-              se: "fe",
-              sch: "t_qu",
-              data: { json: "*" },
-              cond: { row_id: rowId }
-            })
-          )
-        )
+        (ids) => crmQuery({
+          fn: "common_fn",
+          se: "fe",
+          sch: "t_qu",
+          data: { json: "*" },
+          cond: { row_id: ids }
+        })
       )
     );
-    const questions = batchResults.flat().filter((r) => r.status === "fulfilled").flatMap((r) => {
-      const val = r.value;
-      return Array.isArray(val) ? val : [];
-    }).map(parseQuestion).filter((q) => q.questionText.trim() !== "");
-    res.json({ ...parseExam(exam), questions });
+    const questions = batchResults.flatMap((r) => Array.isArray(r) ? r : []).map(parseQuestion).filter((q) => q.questionText.trim().length > 0);
+    questions.sort((a, b) => {
+      if (a.questionNo !== null && b.questionNo !== null) return a.questionNo - b.questionNo;
+      return 0;
+    });
+    const examMeta = parseExam(exam);
+    res.json({
+      ...examMeta,
+      questionCount: actualQuestionCount,
+      questions
+    });
   } catch (err) {
     logger.error({ err }, "Failed to fetch quiz");
     res.status(500).json({ error: "Failed to fetch quiz" });

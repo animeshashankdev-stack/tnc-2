@@ -1,20 +1,26 @@
 import { useParams, Link } from "wouter";
 import { useGetCourses, useListSessions, useGetPromoStatus, useGetUserPurchases, getGetUserPurchasesQueryKey, getListSessionsQueryKey } from "@/lib/api-client";
-import { Video, FileText, Lock, PlayCircle, ChevronRight, ArrowLeft, Smartphone, AlertCircle } from "lucide-react";
+import { Video, FileText, Lock, PlayCircle, ChevronRight, ArrowLeft, ShieldAlert, AlertCircle, Heart } from "lucide-react";
 import Layout from "@/components/Layout";
 import { getUser } from "@/lib/auth";
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { toggleFavorite, isFavorite } from "@/lib/streak";
 
 export default function CourseDetailPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const user = getUser();
   const [activeTab, setActiveTab] = useState<"all" | "video" | "pdf">("all");
+  const [isFav, setIsFav] = useState(false);
+
+  useEffect(() => {
+    if (courseId) setIsFav(isFavorite("courses", courseId));
+  }, [courseId]);
 
   const { data: courses, isLoading: coursesLoading } = useGetCourses();
-  const course = (courses ?? []).find((c) => c.rowId === courseId);
+  const course = (Array.isArray(courses) ? courses : []).find((c) => c.rowId === courseId);
 
-  const { data: sessions, isLoading: sessionsLoading } = useListSessions(
+  const { data: sessionsRaw, isLoading: sessionsLoading } = useListSessions(
     { courseId },
     { query: { queryKey: getListSessionsQueryKey({ courseId }) } }
   );
@@ -24,19 +30,28 @@ export default function CourseDetailPage() {
     query: { enabled: !!user, queryKey: getGetUserPurchasesQueryKey(user?.userId ?? "") },
   });
 
-  const purchasedIds = new Set((purchases ?? []).map((p) => p.courseId));
+  const purchasedIds = new Set((Array.isArray(purchases) ? purchases : []).map((p) => p.courseId));
   const isCourseUnlocked = promo?.enabled || purchasedIds.has(courseId ?? "");
 
-  const allSessions = sessions ?? [];
-  const videoSessions = allSessions.filter((s) => s.contentType === "youtube" || s.videoUrl);
+  const allSessions = Array.isArray(sessionsRaw) ? sessionsRaw : [];
+
+  // Categorise sessions — firebase now counts as video (secured)
+  const videoSessions = allSessions.filter((s) =>
+    s.contentType === "youtube" || s.videoUrl || s.contentType === "firebase"
+  );
   const pdfSessions = allSessions.filter((s) => s.contentType === "pdf" || s.pdfUrl);
-  const firebaseSessions = allSessions.filter((s) => s.contentType === "firebase");
 
   const displaySessions = activeTab === "video"
     ? videoSessions
     : activeTab === "pdf"
       ? pdfSessions
       : allSessions;
+
+  function handleFav() {
+    if (!courseId) return;
+    const next = toggleFavorite("courses", courseId);
+    setIsFav(next);
+  }
 
   if (coursesLoading) {
     return (
@@ -66,9 +81,21 @@ export default function CourseDetailPage() {
       {/* Hero */}
       <div className="tnc-hero-gradient text-white">
         <div className="max-w-4xl mx-auto px-4 py-8">
-          <Link href="/courses" className="flex items-center gap-1 text-white/70 hover:text-white text-sm mb-4 w-fit" data-testid="link-back-courses">
-            <ArrowLeft size={14} /> Back to Courses
-          </Link>
+          <div className="flex items-center justify-between mb-4">
+            <Link href="/courses" className="flex items-center gap-1 text-white/70 hover:text-white text-sm w-fit" data-testid="link-back-courses">
+              <ArrowLeft size={14} /> Back to Courses
+            </Link>
+            <button
+              onClick={handleFav}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                isFav ? "bg-red-500 text-white" : "bg-white/20 text-white hover:bg-white/30"
+              }`}
+              data-testid="btn-favorite-course"
+            >
+              <Heart size={13} className={isFav ? "fill-white" : ""} />
+              {isFav ? "Saved" : "Save"}
+            </button>
+          </div>
           <div className="flex flex-col md:flex-row gap-6">
             {course.imageUrl && (
               <div className="w-full md:w-48 h-32 md:h-36 rounded-xl overflow-hidden flex-shrink-0">
@@ -83,9 +110,7 @@ export default function CourseDetailPage() {
               <div className="flex flex-wrap gap-4 text-sm text-white/80">
                 <span className="flex items-center gap-1"><Video size={14} /> {videoSessions.length} Videos</span>
                 <span className="flex items-center gap-1"><FileText size={14} /> {pdfSessions.length} Notes</span>
-                {firebaseSessions.length > 0 && (
-                  <span className="flex items-center gap-1"><Smartphone size={14} /> {firebaseSessions.length} App-only</span>
-                )}
+                <span className="flex items-center gap-1 text-white/50 text-xs">{allSessions.length} total items</span>
               </div>
             </div>
           </div>
@@ -153,23 +178,26 @@ export default function CourseDetailPage() {
               const isVideo = session.contentType === "youtube" || (!session.pdfUrl && session.videoUrl);
               const isPdf = session.contentType === "pdf" || session.pdfUrl;
               const isFirebase = session.contentType === "firebase";
-              // Free sessions are accessible even without purchase; paid sessions need unlock
               const canAccess = !session.isPaid || isCourseUnlocked;
 
-              const href = isVideo
+              const href = isFirebase
                 ? `/watch/${session.rowId}`
-                : isPdf
-                  ? `/pdf/${session.rowId}`
-                  : `/watch/${session.rowId}`;
+                : isVideo
+                  ? `/watch/${session.rowId}`
+                  : isPdf
+                    ? `/pdf/${session.rowId}`
+                    : `/watch/${session.rowId}`;
 
               const typeColor = isVideo
                 ? "bg-blue-100 text-blue-600"
                 : isPdf
                   ? "bg-red-50 text-red-500"
-                  : "bg-gray-100 text-gray-500";
+                  : isFirebase
+                    ? "bg-amber-50 text-amber-600"
+                    : "bg-gray-100 text-gray-500";
 
-              const typeLabel = isVideo ? "VIDEO" : isPdf ? "PDF" : isFirebase ? "APP" : "CONTENT";
-              const TypeIcon = isVideo ? PlayCircle : isPdf ? FileText : isFirebase ? Smartphone : PlayCircle;
+              const typeLabel = isVideo ? "VIDEO" : isPdf ? "PDF" : isFirebase ? "SECURED" : "CONTENT";
+              const TypeIcon = isVideo ? PlayCircle : isPdf ? FileText : isFirebase ? ShieldAlert : PlayCircle;
 
               return (
                 <motion.div
@@ -178,7 +206,7 @@ export default function CourseDetailPage() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: Math.min(i * 0.03, 0.5) }}
                 >
-                  {canAccess && !isFirebase ? (
+                  {canAccess ? (
                     <Link
                       href={href}
                       className="flex items-center gap-4 p-4 bg-white rounded-xl border border-gray-100 hover:border-blue-200 hover:shadow-md transition-all group"
@@ -192,33 +220,15 @@ export default function CourseDetailPage() {
                         {!session.isPaid && (
                           <span className="text-[10px] font-semibold text-green-600 bg-green-50 px-1.5 py-0.5 rounded-full">FREE</span>
                         )}
+                        {isFirebase && (
+                          <span className="text-[10px] text-amber-600 ml-1">Secured lecture</span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-gray-400 flex-shrink-0">
                         <span className={`px-2 py-0.5 rounded-full font-medium text-[10px] ${typeColor}`}>{typeLabel}</span>
                         <ChevronRight size={16} className="group-hover:text-blue-600 transition-colors" />
                       </div>
                     </Link>
-                  ) : isFirebase ? (
-                    <div
-                      className="flex items-center gap-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100"
-                      data-testid={`session-firebase-${session.rowId}`}
-                    >
-                      <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-500 flex items-center justify-center flex-shrink-0">
-                        <Smartphone size={18} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-gray-700 truncate">{session.title}</p>
-                        <p className="text-xs text-blue-500">Available in the TNC mobile app</p>
-                      </div>
-                      <a
-                        href="https://play.google.com/store/apps/details?id=in.tncnursing.app"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs px-2 py-1 rounded-lg bg-blue-600 text-white font-medium shrink-0"
-                      >
-                        Download App
-                      </a>
-                    </div>
                   ) : (
                     <div
                       className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl border border-gray-100 opacity-70"
